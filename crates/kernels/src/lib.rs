@@ -5,6 +5,7 @@
 //! name at load time and replaceable while the engine runs.
 
 pub mod attention;
+pub mod attention_x86;
 pub mod matmul;
 pub mod matmul_amx;
 pub mod matmul_x86;

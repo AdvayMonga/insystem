@@ -3,6 +3,24 @@
 use crate::bf16_to_f32;
 use crate::par::{par_ranges, SendPtr};
 
+/// `e^x` for f32 by range reduction to `[-ln2/2, ln2/2]` and a degree-6 polynomial; relative
+/// error below 1e-6 for `x` in `[-87, 88]`; inputs below -87.3 return `e^-87.3`.
+#[inline(always)]
+pub fn exp_fast(x: f32) -> f32 {
+    let x = x.clamp(-87.3, 88.7);
+    let n = (x * std::f32::consts::LOG2_E).round();
+    let r = n.mul_add(-0.693_145_75, x);
+    let r = n.mul_add(-1.428_606_8e-6, r);
+    let p: f32 = 1.0 / 720.0;
+    let p = p.mul_add(r, 1.0 / 120.0);
+    let p = p.mul_add(r, 1.0 / 24.0);
+    let p = p.mul_add(r, 1.0 / 6.0);
+    let p = p.mul_add(r, 0.5);
+    let p = p.mul_add(r, 1.0);
+    let p = p.mul_add(r, 1.0);
+    f32::from_bits(((n as i32 + 127) as u32) << 23) * p
+}
+
 /// `out[t] = table[ids[t]]` for a bf16 `[vocab, h]` table.
 pub fn embedding(ids: &[u32], table: &[u16], h: usize, out: &mut [f32]) {
     for (t, &id) in ids.iter().enumerate() {
@@ -142,5 +160,20 @@ pub fn silu_mul(gu: &[f32], inter: usize, out: &mut [f32]) {
 pub fn add_inplace(a: &mut [f32], b: &[f32]) {
     for (x, y) in a.iter_mut().zip(b) {
         *x += y;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exp_fast_accuracy() {
+        let mut worst = 0f32;
+        let mut x = -80.0f32;
+        while x < 80.0 {
+            let (a, b) = (super::exp_fast(x), x.exp());
+            worst = worst.max(((a - b) / b).abs());
+            x += 0.0137;
+        }
+        assert!(worst < 1e-6, "{worst}");
     }
 }

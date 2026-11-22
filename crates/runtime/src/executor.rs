@@ -213,8 +213,11 @@ impl CpuExecutor {
                 for (r, &slot) in plan.slot_mapping.iter().enumerate() {
                     let row = &self.bufs.qkv[r * stride..(r + 1) * stride];
                     let slot = slot as usize;
-                    kc[slot * w..(slot + 1) * w].copy_from_slice(&row[nh * d..nh * d + w]);
-                    vc[slot * w..(slot + 1) * w].copy_from_slice(&row[nh * d + w..nh * d + 2 * w]);
+                    for g in 0..nkv {
+                        let o = insystem_kernels::attention::kv_offset(slot, g, nkv, d, self.cfg.block_size);
+                        kc[o..o + d].copy_from_slice(&row[nh * d + g * d..nh * d + (g + 1) * d]);
+                        vc[o..o + d].copy_from_slice(&row[nh * d + w + g * d..nh * d + w + (g + 1) * d]);
+                    }
                 }
             }
             Instr::Attention { layer } => {

@@ -2,6 +2,7 @@ mod bench;
 mod check;
 mod engine_thread;
 mod http;
+mod kbench;
 mod text;
 
 use std::path::PathBuf;
@@ -51,6 +52,8 @@ enum Cmd {
     },
     /// List kernel variants.
     Kernels,
+    /// Time one kernel on synthetic data.
+    Kbench(kbench::KbenchArgs),
     /// Measure memory read bandwidth and AMX peak throughput on this machine.
     Peaks,
 }
@@ -157,6 +160,7 @@ fn main() -> anyhow::Result<()> {
             print!("{}", insystem_runtime::compile(&spec));
             Ok(())
         }
+        Cmd::Kbench(a) => kbench::run(a),
         Cmd::Peaks => {
             let bw = insystem_kernels::peaks::read_bandwidth(2 << 30, 5);
             let amx = insystem_kernels::peaks::amx_tflops(2_000_000);

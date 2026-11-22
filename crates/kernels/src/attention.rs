@@ -1,11 +1,18 @@
 //! Paged causal attention over a ragged batch.
 //!
-//! K/V cache per layer: `[num_blocks, block_size, n_kv_heads, head_dim]` f32. Each sequence's
+//! K/V cache per layer: `[num_blocks, n_kv_heads, block_size, head_dim]` f32, so one kv head's
+//! keys within a block are one contiguous `block_size * head_dim` run. Each sequence's
 //! new tokens sit at the end of its context; new token `t` of a sequence with `ctx_len` tokens
 //! and `q_len` new tokens is at position `ctx_len - q_len + t` and sees keys up to and including
 //! that position (and, with a sliding window, not before `pos - window + 1`).
 
 use crate::par::{par_for, SendPtr};
+
+/// Offset of kv head `g` of flat slot `slot` (block * block_size + offset) in a K or V cache.
+#[inline(always)]
+pub fn kv_offset(slot: usize, g: usize, kvh: usize, d: usize, bs: usize) -> usize {
+    ((slot / bs * kvh + g) * bs + slot % bs) * d
+}
 
 pub struct AttnSeq<'a> {
     pub q_start: usize,
@@ -56,7 +63,8 @@ pub fn naive(a: &AttnArgs) {
         let mut mx = f32::NEG_INFINITY;
         for p in lo..=pos {
             let slot = s.block_table[p / bs] as usize * bs + p % bs;
-            let k = &a.k_cache[(slot * kvh + kv_head) * d..(slot * kvh + kv_head + 1) * d];
+            let off = kv_offset(slot, kv_head, kvh, d, bs);
+            let k = &a.k_cache[off..off + d];
             let sc = crate::matmul::dot(q, k) * a.scale;
             mx = mx.max(sc);
             scores.push(sc);
@@ -70,7 +78,8 @@ pub fn naive(a: &AttnArgs) {
         let mut o = vec![0f32; d];
         for (i, p) in (lo..=pos).enumerate() {
             let slot = s.block_table[p / bs] as usize * bs + p % bs;
-            let v = &a.v_cache[(slot * kvh + kv_head) * d..(slot * kvh + kv_head + 1) * d];
+            let off = kv_offset(slot, kv_head, kvh, d, bs);
+            let v = &a.v_cache[off..off + d];
             let w = scores[i] * inv;
             for (oo, vv) in o.iter_mut().zip(v) {
                 *oo += w * vv;
@@ -82,7 +91,7 @@ pub fn naive(a: &AttnArgs) {
 }
 
 /// Query tokens per task.
-const QT: usize = 16;
+pub const QT: usize = 16;
 const MAX_GROUP: usize = 8;
 const MAX_D: usize = 256;
 
@@ -142,7 +151,7 @@ fn flash_task(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, group: usize, d: u
                     let v = if p > pos || p < wlo {
                         f32::NEG_INFINITY
                     } else {
-                        let off = ((base + kk) * kvh + g) * d;
+                        let off = kv_offset(base + kk, g, kvh, d, bs);
                         crate::matmul::dot(q, &a.k_cache[off..off + d]) * a.scale
                     };
                     sc[ri][kk] = v;
@@ -169,7 +178,7 @@ fn flash_task(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, group: usize, d: u
         }
         // Weighted V, each V row loaded once for all rows.
         for kk in 0..n_keys {
-            let off = ((base + kk) * kvh + g) * d;
+            let off = kv_offset(base + kk, g, kvh, d, bs);
             let v = &a.v_cache[off..off + d];
             for ri in 0..rows {
                 let w = sc[ri][kk];
@@ -228,21 +237,32 @@ mod tests {
 
     #[test]
     fn kernels_match_dense() {
-        let (h, kvh, d, bs) = (4, 2, 32, 4);
+        let (h, kvh, d, bs) = (4, 2, 64, 4);
         for &(q_len, ctx) in &[(1usize, 1usize), (1, 9), (5, 5), (3, 11), (16, 37)] {
             let q = rand_vec(q_len * h * d, 3);
             let k = rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 4);
             let v = rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 5);
             let bt: Vec<u32> = (0..ctx.div_ceil(bs) as u32).collect();
             let want = dense(&q, &k, &v, q_len, ctx, h, kvh, d, 0.17);
+            let to_paged = |x: &[f32]| {
+                let mut out = vec![0f32; x.len()];
+                for slot in 0..ctx.div_ceil(bs) * bs {
+                    for g in 0..kvh {
+                        let o = kv_offset(slot, g, kvh, d, bs);
+                        out[o..o + d].copy_from_slice(&x[(slot * kvh + g) * d..(slot * kvh + g + 1) * d]);
+                    }
+                }
+                out
+            };
+            let (kp, vp) = (to_paged(&k), to_paged(&v));
             for kern in ATTENTION_KERNELS {
                 let mut out = vec![0f32; q_len * h * d];
                 let seqs = [AttnSeq { q_start: 0, q_len, ctx_len: ctx, block_table: &bt }];
                 (kern.run)(&AttnArgs {
                     q: &q,
                     q_stride: h * d,
-                    k_cache: &k,
-                    v_cache: &v,
+                    k_cache: &kp,
+                    v_cache: &vp,
                     out: SendPtr(out.as_mut_ptr()),
                     seqs: &seqs,
                     n_heads: h,

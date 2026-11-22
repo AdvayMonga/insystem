@@ -3,6 +3,7 @@
 //! repacking.
 
 use crate::attention::{self, AttnArgs};
+use crate::attention_x86;
 use crate::{matmul, matmul_amx, matmul_x86};
 
 /// A bf16 weight `[n, k]` (out features × in features) in a variant's packed layout.
@@ -36,6 +37,7 @@ pub static MATMUL_KERNELS: &[MatmulKernel] = &[
 ];
 
 pub static ATTENTION_KERNELS: &[AttentionKernel] = &[
+    AttentionKernel { name: "flash_avx512", about: "flash with AVX-512: query row and output row held in registers per KV block; head_dim 64/128/256, else falls back to flash", run: attention_x86::flash_avx512 },
     AttentionKernel { name: "flash", about: "per (seq, kv head, 16 query tokens): K/V rows shared across the GQA group and query chunk, online softmax per KV block", run: attention::flash },
     AttentionKernel { name: "naive", about: "per (token, head): full scores, softmax, weighted sum", run: attention::naive },
 ];
@@ -68,7 +70,7 @@ impl KernelSet {
 }
 
 pub const DEFAULT_MATMUL: &str = "amx";
-pub const DEFAULT_ATTENTION: &str = "flash";
+pub const DEFAULT_ATTENTION: &str = "flash_avx512";
 
 impl PackedWeight {
     pub fn new(kernel: &MatmulKernel, rowmajor: &[u16], n: usize, k: usize) -> Self {

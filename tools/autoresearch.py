@@ -2,8 +2,10 @@
 
     python tools/autoresearch.py --label "avx512 matmul" --hypothesis "..." [--engine "--matmul x"]
 
-The benchmark is fixed for the whole loop (see DECISIONS.md D19). A run is `best` when its total
-throughput (best of `--reps` runs, since this shared machine has bursts of interference) beats the best so far by more than the noise margin, `no-gain` otherwise,
+The benchmark is fixed for the whole loop (see DECISIONS.md D19). The candidate and the current
+champion binary (local/champion, the last `best`) are run alternately `--reps` times each, so slow
+periods of this shared machine hit both. A run is `best` when the candidate's best run beats the
+champion's best run by more than the noise margin, `no-gain` otherwise,
 `failed-check` when `insystem check` fails, `crash` when the build or a run fails. The row is
 appended to autoresearch/results.jsonl; keeping or reverting the code is done by hand in git.
 """
@@ -12,6 +14,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -20,9 +23,10 @@ RESULTS = os.path.join(ROOT, "autoresearch", "results.jsonl")
 MODEL = os.environ.get("INSYSTEM_MODEL", "/home/user/models/Qwen3-1.7B")
 REF = os.environ.get("INSYSTEM_REF", os.path.join(ROOT, "local", "ref_qwen3_1.7b.json"))
 BIN = os.path.join(ROOT, "target", "release", "insystem")
+CHAMPION = os.path.join(ROOT, "local", "champion", "insystem")
 BENCH = ["--num-prompts", "16", "--input-len", "128", "--output-len", "64", "--range-ratio", "0.8",
          "--max-num-seqs", "16", "--max-num-batched-tokens", "512", "--kv-cache-gb", "1.5", "--profile"]
-NOISE = 0.03
+NOISE = 0.02
 
 
 def rows():
@@ -42,6 +46,7 @@ def main():
     ap.add_argument("--engine", default="", help="extra engine arguments for check and bench")
     ap.add_argument("--skip-check", action="store_true")
     ap.add_argument("--reps", type=int, default=3, help="benchmark runs; the best is recorded")
+    ap.add_argument("--champion-engine", default="", help="engine arguments for the champion binary")
     a = ap.parse_args()
     extra = shlex.split(a.engine)
     prev = rows()
@@ -64,8 +69,13 @@ def main():
         if c.returncode != 0 or not row["check"].get("pass"):
             row.update(status="crash" if "pass" not in row["check"] or c.returncode not in (0, 1) else "failed-check")
             return finish(row)
-    runs = []
+    runs, champ = [], []
+    have_champ = os.path.exists(CHAMPION) and prev
     for _ in range(a.reps):
+        if have_champ:
+            c = subprocess.run([CHAMPION, "bench", "--model", MODEL, *BENCH, *shlex.split(a.champion_engine)], capture_output=True, text=True)
+            if c.returncode == 0:
+                champ.append(json.loads(c.stdout.strip().splitlines()[-1])["total_tok_s"])
         r = subprocess.run([BIN, "bench", "--model", MODEL, *BENCH, *extra], capture_output=True, text=True)
         if r.returncode != 0:
             row.update(status="crash", error=r.stderr[-2000:])
@@ -73,14 +83,19 @@ def main():
         runs.append(json.loads(r.stdout.strip().splitlines()[-1]))
     res = max(runs, key=lambda x: x["total_tok_s"])
     row["all_total_tok_s"] = [x["total_tok_s"] for x in runs]
+    row["champion_total_tok_s"] = champ
     row.update({k: res[k] for k in ("total_tok_s", "output_tok_s", "elapsed_s", "mean_tokens_per_step", "steps", "kernels", "profile")})
+    ref = max(champ) if champ else best
     if best is None:
         row["status"] = "baseline"
-    elif res["total_tok_s"] > best * (1 + NOISE):
+    elif res["total_tok_s"] > ref * (1 + NOISE):
         row["status"] = "best"
     else:
         row["status"] = "no-gain"
     row["best_before"] = best
+    if row["status"] in ("best", "baseline"):
+        os.makedirs(os.path.dirname(CHAMPION), exist_ok=True)
+        shutil.copy2(BIN, CHAMPION)
     finish(row)
 
 
@@ -91,7 +106,7 @@ def finish(row):
     prof = row.get("profile") or {}
     ops = sorted(((k, v["seconds"]) for k, v in (prof.get("ops") or {}).items()), key=lambda x: -x[1])
     tot = sum(s for _, s in ops) or 1
-    print(json.dumps({k: row.get(k) for k in ("iter", "label", "status", "total_tok_s", "output_tok_s", "best_before", "check")}))
+    print(json.dumps({k: row.get(k) for k in ("iter", "label", "status", "total_tok_s", "all_total_tok_s", "champion_total_tok_s", "best_before", "check")}))
     for k, s in ops[:8]:
         print(f"  {k:<16} {s:8.2f}s {100 * s / tot:5.1f}%")
     if row["status"] in ("crash",):
