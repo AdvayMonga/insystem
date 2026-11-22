@@ -99,17 +99,17 @@ pub fn configure_current_thread() {
     });
 }
 
-/// C[16×64] += A[16×kp] · B for one 16-row tile and one 4-panel group, stored to `c` as four
-/// consecutive 16×16 f32 tiles.
+/// C[16×64] += A · B for one 16-row tile and one 4-panel group. A tiles are 1 KiB and
+/// contiguous per k chunk; the four 16×16 f32 C tiles are stored consecutively to `c`.
 #[inline(never)]
-unsafe fn tile_row_group(a: *const u16, a_stride: usize, b: *const u16, chunks: usize, panel_stride: usize, c: *mut f32) {
+unsafe fn tile_1x4(a: *const u16, b: *const u16, chunks: usize, panel_stride: usize, c: *mut f32) {
     asm!("tilezero tmm0", "tilezero tmm1", "tilezero tmm2", "tilezero tmm3", options(nostack, nomem));
     let b1 = b.add(panel_stride);
     let b2 = b.add(2 * panel_stride);
     let b3 = b.add(3 * panel_stride);
     for ch in 0..chunks {
         asm!(
-            "tileloadd tmm4, [{a} + {sa}*1]",
+            "tileloadd tmm4, [{a} + {s64}*1]",
             "tileloadd tmm5, [{b0} + {s64}*1]",
             "tileloadd tmm6, [{b1} + {s64}*1]",
             "tdpbf16ps tmm0, tmm4, tmm5",
@@ -118,8 +118,7 @@ unsafe fn tile_row_group(a: *const u16, a_stride: usize, b: *const u16, chunks: 
             "tileloadd tmm5, [{b3} + {s64}*1]",
             "tdpbf16ps tmm2, tmm4, tmm7",
             "tdpbf16ps tmm3, tmm4, tmm5",
-            a = in(reg) a.add(ch * 32),
-            sa = in(reg) a_stride * 2,
+            a = in(reg) a.add(ch * 512),
             b0 = in(reg) b.add(ch * 512),
             b1 = in(reg) b1.add(ch * 512),
             b2 = in(reg) b2.add(ch * 512),
@@ -128,6 +127,37 @@ unsafe fn tile_row_group(a: *const u16, a_stride: usize, b: *const u16, chunks: 
             options(nostack, readonly),
         );
     }
+    store4(c);
+}
+
+/// C[32×32] += A · B for two 16-row tiles and two panels: C0 = A0·B0, C1 = A0·B1, C2 = A1·B0,
+/// C3 = A1·B1. Four tile loads feed four tile multiplies.
+#[inline(never)]
+unsafe fn tile_2x2(a0: *const u16, a1: *const u16, b0: *const u16, b1: *const u16, chunks: usize, c: *mut f32) {
+    asm!("tilezero tmm0", "tilezero tmm1", "tilezero tmm2", "tilezero tmm3", options(nostack, nomem));
+    for ch in 0..chunks {
+        asm!(
+            "tileloadd tmm4, [{a0} + {s64}*1]",
+            "tileloadd tmm6, [{b0} + {s64}*1]",
+            "tdpbf16ps tmm0, tmm4, tmm6",
+            "tileloadd tmm7, [{b1} + {s64}*1]",
+            "tdpbf16ps tmm1, tmm4, tmm7",
+            "tileloadd tmm5, [{a1} + {s64}*1]",
+            "tdpbf16ps tmm2, tmm5, tmm6",
+            "tdpbf16ps tmm3, tmm5, tmm7",
+            a0 = in(reg) a0.add(ch * 512),
+            a1 = in(reg) a1.add(ch * 512),
+            b0 = in(reg) b0.add(ch * 512),
+            b1 = in(reg) b1.add(ch * 512),
+            s64 = in(reg) 64usize,
+            options(nostack, readonly),
+        );
+    }
+    store4(c);
+}
+
+#[inline(always)]
+unsafe fn store4(c: *mut f32) {
     asm!(
         "tilestored [{c0} + {s}*1], tmm0",
         "tilestored [{c1} + {s}*1], tmm1",
@@ -142,6 +172,14 @@ unsafe fn tile_row_group(a: *const u16, a_stride: usize, b: *const u16, chunks: 
     );
 }
 
+/// Copies a 16×16 C tile (rows `rows`, columns `cols` valid) to `y` at (i0, j0).
+#[inline(always)]
+unsafe fn copy_out(c: &[f32], y: SendPtr<f32>, n: usize, i0: usize, j0: usize, rows: usize, cols: usize) {
+    for r in 0..rows {
+        std::ptr::copy_nonoverlapping(c.as_ptr().add(r * 16), y.add((i0 + r) * n + j0), cols);
+    }
+}
+
 pub fn run(x: &[f32], m: usize, w: &PackedWeight, y: &mut [f32]) {
     let (n, k) = (w.n, w.k);
     assert!(x.len() >= m * k && y.len() >= m * n);
@@ -149,48 +187,79 @@ pub fn run(x: &[f32], m: usize, w: &PackedWeight, y: &mut [f32]) {
     let kp = kpad(k);
     let chunks = kp / 32;
     let mt = m.div_ceil(16);
-    // Activations → bf16, padded to whole 16-row tiles and to kp.
-    let mut a = vec![0u16; mt * 16 * kp];
+    // Row tiles: one for m <= 16, else an even number for 2x2 blocking.
+    let mt_alloc = if mt == 1 { 1 } else { mt.div_ceil(2) * 2 };
+    // Activations → bf16, packed tile by tile: tile (t, c) is 16 rows × 32 values, contiguous.
+    let mut a = vec![0u16; mt_alloc * chunks * 512];
     {
         let ap = SendPtr(a.as_mut_ptr());
         par_ranges(m, 16, |r0, r1| {
-            for r in r0..r1 {
-                // SAFETY: each row is written by one task.
-                let dst = unsafe { std::slice::from_raw_parts_mut(ap.add(r * kp), k) };
-                for (d, &s) in dst.iter_mut().zip(&x[r * k..(r + 1) * k]) {
-                    *d = f32_to_bf16(s);
+            for i in r0..r1 {
+                let (t, rr) = (i / 16, i % 16);
+                let src = &x[i * k..(i + 1) * k];
+                for (ch, part) in src.chunks(32).enumerate() {
+                    // SAFETY: row i of tile (t, ch) is written by one task only.
+                    let dst = unsafe { std::slice::from_raw_parts_mut(ap.add((t * chunks + ch) * 512 + rr * 32), part.len()) };
+                    for (d, &v) in dst.iter_mut().zip(part) {
+                        *d = f32_to_bf16(v);
+                    }
                 }
             }
         });
     }
-    let groups = npanels(n) / GROUP;
+    let panels = npanels(n);
     let panel_stride = chunks * 512;
     let yp = SendPtr(y.as_mut_ptr());
     let ap = SendPtr(a.as_ptr() as *mut u16);
     let bp = SendPtr(w.data.as_ptr() as *mut u16);
-    let chunk = (groups / (num_threads() * 3)).max(1);
-    par_ranges(groups, chunk, |g0, g1| {
+    let atile = |t: usize| -> *const u16 { unsafe { ap.ptr().add(t * chunks * 512) } };
+    if mt == 1 {
+        let groups = panels / GROUP;
+        let chunk = (groups / (num_threads() * 3)).max(1);
+        par_ranges(groups, chunk, |g0, g1| {
+            configure_current_thread();
+            let mut c = [0f32; 1024];
+            for g in g0..g1 {
+                let j0 = g * GROUP * 16;
+                if j0 >= n {
+                    break;
+                }
+                // SAFETY: loads stay inside the packed buffers; each task owns its columns.
+                unsafe {
+                    tile_1x4(atile(0), bp.ptr().add(g * GROUP * panel_stride), chunks, panel_stride, c.as_mut_ptr());
+                    for q in 0..GROUP {
+                        let jj = j0 + q * 16;
+                        if jj < n {
+                            copy_out(&c[q * 256..], yp, n, 0, jj, m, (n - jj).min(16));
+                        }
+                    }
+                }
+            }
+        });
+        return;
+    }
+    let pairs = panels / 2;
+    let chunk = (pairs / (num_threads() * 3)).max(1);
+    par_ranges(pairs, chunk, |p0, p1| {
         configure_current_thread();
         let mut c = [0f32; 1024];
-        for g in g0..g1 {
-            let j0 = g * GROUP * 16;
+        for pp in p0..p1 {
+            let j0 = pp * 32;
             if j0 >= n {
                 break;
             }
-            let cols = (n - j0).min(64);
-            for t in 0..mt {
-                // SAFETY: tile loads stay inside the padded A buffer and the packed weights;
-                // each task writes only its own output columns.
+            let b0 = unsafe { bp.ptr().add(2 * pp * panel_stride) };
+            let b1 = unsafe { b0.add(panel_stride) };
+            for tp in 0..mt_alloc / 2 {
+                let (t0, t1) = (2 * tp, 2 * tp + 1);
+                // SAFETY: as above.
                 unsafe {
-                    tile_row_group(ap.ptr().add(t * 16 * kp), kp, bp.ptr().add(g * GROUP * panel_stride), chunks, panel_stride, c.as_mut_ptr());
-                }
-                let rows = (m - t * 16).min(16);
-                for r in 0..rows {
-                    let i = t * 16 + r;
-                    for cc in 0..cols {
-                        let (tile, col) = (cc / 16, cc % 16);
-                        // SAFETY: (i, j0 + cc) is inside y and owned by this task.
-                        unsafe { *yp.add(i * n + j0 + cc) = c[tile * 256 + r * 16 + col] };
+                    tile_2x2(atile(t0), atile(t1), b0, b1, chunks, c.as_mut_ptr());
+                    for (q, (t, jj)) in [(t0, j0), (t0, j0 + 16), (t1, j0), (t1, j0 + 16)].into_iter().enumerate() {
+                        let i0 = t * 16;
+                        if i0 < m && jj < n {
+                            copy_out(&c[q * 256..], yp, n, i0, jj, (m - i0).min(16), (n - jj).min(16));
+                        }
                     }
                 }
             }
