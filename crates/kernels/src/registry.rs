@@ -3,7 +3,7 @@
 //! repacking.
 
 use crate::attention::{self, AttnArgs};
-use crate::matmul;
+use crate::{matmul, matmul_x86};
 
 /// A bf16 weight `[n, k]` (out features × in features) in a variant's packed layout.
 pub struct PackedWeight {
@@ -31,6 +31,7 @@ pub struct AttentionKernel {
 
 pub static MATMUL_KERNELS: &[MatmulKernel] = &[
     MatmulKernel { name: "naive", about: "scalar triple loop; the correctness reference", pack: matmul::pack_rowmajor, run: matmul::naive },
+    MatmulKernel { name: "tile_f32", about: "AVX-512: 16-column panels, MRx32 f32 register tile, bf16 widened once per k step", pack: matmul_x86::pack_panels16, run: matmul_x86::tile_f32 },
     MatmulKernel { name: "rowdot", about: "row-major bf16, one weight row converted then dotted with every input row", pack: matmul::pack_rowmajor, run: matmul::rowdot },
 ];
 
@@ -65,7 +66,7 @@ impl KernelSet {
     }
 }
 
-pub const DEFAULT_MATMUL: &str = "rowdot";
+pub const DEFAULT_MATMUL: &str = "tile_f32";
 pub const DEFAULT_ATTENTION: &str = "naive";
 
 impl PackedWeight {

@@ -9,6 +9,11 @@ unsafe impl<T> Send for SendPtr<T> {}
 unsafe impl<T> Sync for SendPtr<T> {}
 
 impl<T> SendPtr<T> {
+    #[inline]
+    pub fn ptr(self) -> *mut T {
+        self.0
+    }
+
     /// # Safety
     /// The caller writes only indices no other thread writes.
     #[inline]

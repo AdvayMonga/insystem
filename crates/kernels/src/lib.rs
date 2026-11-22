@@ -6,6 +6,7 @@
 
 pub mod attention;
 pub mod matmul;
+pub mod matmul_x86;
 pub mod ops;
 pub mod par;
 pub mod registry;
