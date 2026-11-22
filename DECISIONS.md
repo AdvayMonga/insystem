@@ -124,3 +124,63 @@ and the MoE path.
 once, total (input + output) tokens per second. It is fixed for the whole loop so every point on
 the chart is comparable, and short enough to run each iteration. The serving sweep (InferenceX
 shape) and the agentic workload are run at the start and the end against llama.cpp.
+
+## Decisions made by the autoresearch loop
+
+Each of these replaced what it beat in a measured comparison (autoresearch/LOG.md has the
+numbers); the loser was removed, except the naive kernels kept as test references.
+
+**D20. Matmuls run on Intel AMX in bf16; activations are rounded to bf16 at each matmul input,
+accumulation stays f32** (replaces D13's f32 activations for matmuls). AMX does 16× the
+multiply-adds per instruction of AVX-512 FMA (12.2 TFLOP/s measured on 4 cores). The rounding
+moves log-probabilities by ~0.03 against the fp32 reference, inside the check's 0.05 tolerance,
+and greedy tokens still match. Weights are packed into 1 KiB VNNI tiles at load; activations are
+packed tile-contiguous per call (a 4 KiB row stride made tile loads alias in L1). m ≤ 16 uses one
+row tile against four weight panels; larger m uses 2×2 tile blocking (4 tile loads per 4 tile
+multiplies). Measured ceilings on this machine: 51.7 GB/s DRAM read, 3.5 TFLOP/s for the 2×2
+loop with loads from L1. Decode matmuls run near the first, prefill near half the second.
+
+**D21. KV cache is bf16, laid out `[block][kv head][slot][head dim]`** (replaces f32
+`[block][slot][kv head][dim]`). One kv head's keys in a block are one contiguous run, so the
+attention task for (sequence, kv head) streams memory the prefetcher can follow; the old layout
+put consecutive keys 4 KiB apart and made decode attention latency-bound. bf16 halves the bytes
+once attention is bandwidth-bound and doubles the tokens a given cache size holds.
+
+**D22. Attention is an AVX-512 kernel, one task per (sequence, kv head, 16 query tokens):** each
+K/V row is loaded once for every query head of its GQA group and every query token of the chunk;
+the query row and the output accumulator live in registers per KV block; softmax is online per
+block; scratch is per thread. The portable `flash` kernel remains for head dims that are not
+64/128/256, and `naive` is the test reference.
+
+**D23. Kernels run on a persistent spinning thread pool, not rayon** (replaces D15). A decode
+step is ~360 short parallel regions; rayon's workers sleep between them and every region paid a
+wake-up. The pool's workers spin on an epoch counter between jobs (the calling thread takes tasks
+too) and fall back to 100 µs sleeps after 2 ms idle. +20% end to end. Rayon remains only for
+weight loading.
+
+**D24. Elementwise transcendentals use a polynomial `exp`** (degree 6 after range reduction,
+relative error < 1e-6) that inlines and vectorizes; libm's `expf` is a scalar call. Used by SiLU
+and attention softmax.
+
+**D25. Speculative decoding by n-gram lookup lives in the core, off by default
+(`--num-speculative-tokens K`).** Drafts are what followed the most recent earlier occurrence of a
+sequence's last 3 (else 2) tokens, so no draft model is needed; the executor samples every draft
+row and the core accepts the longest matching prefix plus one corrected token, so greedy output is
+unchanged. It does not raise this offline benchmark (requests decode in lockstep, so the least
+predictable one sets the step count), but agent traffic re-sends and re-quotes its own context,
+where drafts are cheap and accepted often. Greedy requests only; sampled requests would need
+rejection sampling.
+
+## Measurement method
+
+**D26. An experiment is judged by interleaved A/B against the current champion binary:** the
+candidate and the saved champion run alternately (4 runs each) in the same session; the candidate
+wins if its best run beats the champion's best run by 2%. Single runs on this shared VM vary by
+±15%, and slow periods last minutes, so comparing against a number recorded earlier made wins and
+losses up. Every candidate must pass `insystem check` first.
+
+**D27. Kernel microbenchmarks stream weights from DRAM.** The host's last-level cache is 260 MB,
+so a microbenchmark that reuses one weight matrix measures cache bandwidth and misled one
+experiment; `insystem kbench` rotates ~1 GiB of weight copies. `insystem peaks` measures the
+machine's own ceilings (DRAM read, AMX in registers, AMX with tile loads) so each kernel's number
+has a roof to be read against.
