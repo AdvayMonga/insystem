@@ -51,10 +51,14 @@ pub fn spec_from_config(cfg: &Value) -> anyhow::Result<ModelSpec> {
     let sw = cfg.get("sliding_window").and_then(Value::as_u64).map(|x| x as usize).filter(|_| use_sw);
     let max_window_layers = cfg.get("max_window_layers").and_then(Value::as_u64).map(|x| x as usize).unwrap_or(n_layers);
 
-    let llama3 = cfg.get("rope_scaling").filter(|r| r.get("rope_type").and_then(Value::as_str) == Some("llama3")).map(|r| {
+    // Newer configs put theta and scaling together under `rope_parameters`.
+    let rope_params = cfg.get("rope_parameters").filter(|r| r.is_object());
+    let rope_theta = rope_params.and_then(|r| r.get("rope_theta")).and_then(Value::as_f64).map(|x| x as f32).unwrap_or_else(|| f(cfg, "rope_theta", 10000.0));
+    let scaling = rope_params.filter(|r| r.get("rope_type").and_then(Value::as_str).is_some_and(|t| t != "default")).or(cfg.get("rope_scaling"));
+    let llama3 = scaling.filter(|r| r.get("rope_type").and_then(Value::as_str) == Some("llama3")).map(|r| {
         (f(r, "factor", 8.0), f(r, "low_freq_factor", 1.0), f(r, "high_freq_factor", 4.0), f(r, "original_max_position_embeddings", 8192.0))
     });
-    if let Some(r) = cfg.get("rope_scaling") {
+    if let Some(r) = scaling {
         if !r.is_null() && llama3.is_none() {
             bail!("unsupported rope_scaling {r}");
         }
@@ -71,7 +75,7 @@ pub fn spec_from_config(cfg: &Value) -> anyhow::Result<ModelSpec> {
                 .unwrap_or_default();
             if !mlp_only.contains(&i) && (i + 1) % step == 0 {
                 FfnSpec::Moe {
-                    n_experts: u(cfg, "num_experts")?,
+                    n_experts: u(cfg, "num_experts").or_else(|_| u(cfg, "num_local_experts"))?,
                     top_k: u(cfg, "num_experts_per_tok")?,
                     intermediate: u(cfg, "moe_intermediate_size")?,
                     norm_topk_prob: b(cfg, "norm_topk_prob", true),
@@ -102,7 +106,7 @@ pub fn spec_from_config(cfg: &Value) -> anyhow::Result<ModelSpec> {
         hidden,
         norm_eps: f(cfg, "rms_norm_eps", 1e-6),
         tie_embeddings: b(cfg, "tie_word_embeddings", false),
-        rope: RopeSpec { theta: f(cfg, "rope_theta", 10000.0), llama3_scaling: llama3, rotary_dim: None },
+        rope: RopeSpec { theta: rope_theta, llama3_scaling: llama3, rotary_dim: None },
         max_position: cfg.get("max_position_embeddings").and_then(Value::as_u64).unwrap_or(4096) as usize,
         layers,
         eos_token_ids: eos_ids(cfg),
