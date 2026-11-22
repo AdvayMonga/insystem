@@ -85,6 +85,9 @@ pub struct EngineArgs {
     /// Time every op of the forward pass.
     #[arg(long)]
     pub profile: bool,
+    /// Draft tokens per greedy sequence per step, proposed by n-gram lookup (0 = off).
+    #[arg(long, default_value_t = 0)]
+    pub num_speculative_tokens: usize,
 }
 
 pub fn build_engine(a: &EngineArgs) -> anyhow::Result<Engine<CpuExecutor>> {
@@ -125,6 +128,7 @@ pub fn build_engine(a: &EngineArgs) -> anyhow::Result<Engine<CpuExecutor>> {
             max_model_len: a.max_model_len,
             enable_prefix_caching: !a.no_prefix_caching,
             eos_token_ids: eos,
+            num_speculative_tokens: a.num_speculative_tokens,
         },
         exec,
     )

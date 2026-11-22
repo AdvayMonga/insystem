@@ -337,8 +337,12 @@ impl CpuExecutor {
                 block_table: &bt[s.bt_start as usize..(s.bt_start + s.bt_len) as usize],
             })
             .collect();
-        let sampled: Vec<(usize, SamplerSpec)> =
-            plan.seqs.iter().filter_map(|s| s.sample.map(|sp| ((s.q_start + s.q_len - 1) as usize, sp))).collect();
+        let sampled: Vec<(usize, SamplerSpec)> = plan
+            .seqs
+            .iter()
+            .filter_map(|s| s.sample.map(|sp| (s, sp)))
+            .flat_map(|(s, sp)| (0..s.n_sample).map(move |r| ((s.q_start + s.q_len - s.n_sample + r) as usize, sp)))
+            .collect();
         let mut out = Vec::new();
         let instrs = std::mem::take(&mut self.program.instrs);
         let mut prof = self.profile.take();
@@ -379,6 +383,7 @@ impl CpuExecutor {
                 bt_start: 0,
                 bt_len: blocks.len() as u32,
                 sample: Some(SamplerSpec { temperature: 0.0, top_k: 0, top_p: 1.0, rng_seed: 0 }),
+                n_sample: 1,
             }],
             block_tables: blocks,
             num_prefill_tokens: n as u32,

@@ -107,6 +107,7 @@ pub fn run(a: BenchArgs) -> anyhow::Result<()> {
         "computed_tokens": st.scheduled_tokens,
         "exec_s": st.exec_time.as_secs_f64(), "sched_s": st.sched_time.as_secs_f64(),
         "preemptions": eng.sched.num_preemptions,
+        "spec_proposed": eng.sched.spec_proposed, "spec_accepted": eng.sched.spec_accepted,
         "profile": eng.exec.profile.as_ref().map(|p| p.to_json()),
     });
     eprintln!(

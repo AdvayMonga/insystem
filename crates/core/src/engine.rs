@@ -12,11 +12,13 @@ pub struct EngineConfig {
     pub max_model_len: usize,
     pub enable_prefix_caching: bool,
     pub eos_token_ids: Vec<u32>,
+    /// Draft tokens per greedy decoding sequence per step (n-gram lookup); 0 turns it off.
+    pub num_speculative_tokens: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { max_num_seqs: 64, max_num_batched_tokens: 512, max_model_len: 4096, enable_prefix_caching: true, eos_token_ids: vec![] }
+        Self { max_num_seqs: 64, max_num_batched_tokens: 512, max_model_len: 4096, enable_prefix_caching: true, eos_token_ids: vec![], num_speculative_tokens: 0 }
     }
 }
 
@@ -50,6 +52,7 @@ impl<E: Executor> Engine<E> {
                 max_num_batched_tokens: cfg.max_num_batched_tokens,
                 max_model_len: cfg.max_model_len,
                 eos_token_ids: cfg.eos_token_ids.clone(),
+                num_speculative_tokens: cfg.num_speculative_tokens,
             },
             kv,
         );

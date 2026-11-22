@@ -28,8 +28,10 @@ pub struct SeqSlice {
     /// Range of this sequence's block ids in `BatchPlan::block_tables`.
     pub bt_start: u32,
     pub bt_len: u32,
-    /// Whether the last new token's logits are sampled this step.
+    /// Whether the last `n_sample` new tokens' logits are sampled this step (more than one when
+    /// draft tokens are being verified).
     pub sample: Option<SamplerSpec>,
+    pub n_sample: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,7 +52,7 @@ impl BatchPlan {
         self.token_ids.len()
     }
     pub fn num_sampled(&self) -> usize {
-        self.seqs.iter().filter(|s| s.sample.is_some()).count()
+        self.seqs.iter().filter(|s| s.sample.is_some()).map(|s| s.n_sample as usize).sum()
     }
     pub fn block_table(&self, s: &SeqSlice) -> &[u32] {
         &self.block_tables[s.bt_start as usize..(s.bt_start + s.bt_len) as usize]
@@ -63,7 +65,7 @@ pub struct Sampled {
     pub logprob: f32,
 }
 
-/// One entry per sequence with `sample.is_some()`, in plan order.
+/// `n_sample` entries per sequence with `sample.is_some()`, in plan order.
 #[derive(Clone, Debug, Default)]
 pub struct StepOutput {
     pub sampled: Vec<Sampled>,
