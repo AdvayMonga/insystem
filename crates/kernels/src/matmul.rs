@@ -1,7 +1,6 @@
 //! Matmul variants: `y[m, n] = x[m, k] · wᵀ` with bf16 `w` and f32 `x`, `y`.
 
 use crate::bf16_to_f32;
-use crate::par::{num_threads, par_ranges, SendPtr};
 use crate::registry::PackedWeight;
 
 pub fn pack_rowmajor(w: &[u16], _n: usize, _k: usize) -> Vec<u16> {
@@ -38,26 +37,6 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
         s += x * y;
     }
     s + acc.iter().sum::<f32>()
-}
-
-pub fn rowdot(x: &[f32], m: usize, w: &PackedWeight, y: &mut [f32]) {
-    let (n, k) = (w.n, w.k);
-    assert!(x.len() >= m * k && y.len() >= m * n);
-    let yp = SendPtr(y.as_mut_ptr());
-    let chunk = (n / (num_threads() * 4)).max(16);
-    par_ranges(n, chunk, |n0, n1| {
-        let mut row = vec![0f32; k];
-        for j in n0..n1 {
-            for (d, &s) in row.iter_mut().zip(&w.data[j * k..(j + 1) * k]) {
-                *d = bf16_to_f32(s);
-            }
-            for i in 0..m {
-                let v = dot(&x[i * k..(i + 1) * k], &row);
-                // SAFETY: column j is written only by the task that owns [n0, n1).
-                unsafe { *yp.add(i * n + j) = v };
-            }
-        }
-    });
 }
 
 #[cfg(test)]
