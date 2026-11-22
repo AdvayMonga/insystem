@@ -90,6 +90,7 @@ pub struct EngineArgs {
 pub fn build_engine(a: &EngineArgs) -> anyhow::Result<Engine<CpuExecutor>> {
     if a.threads > 0 {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(a.threads).build_global();
+        insystem_kernels::par::set_threads(a.threads);
     }
     let t0 = std::time::Instant::now();
     let exec = CpuExecutor::load(

@@ -93,7 +93,7 @@ pub fn run(a: BenchArgs) -> anyhow::Result<()> {
         "num_prompts": a.num_prompts,
         "input_len": a.input_len, "output_len": a.output_len, "range_ratio": a.range_ratio, "prefix_len": a.prefix_len,
         "max_num_seqs": a.engine.max_num_seqs, "max_num_batched_tokens": a.engine.max_num_batched_tokens,
-        "threads": rayon::current_num_threads(),
+        "threads": insystem_kernels::par::num_threads(),
         "kernels": {"matmul": eng.exec.kernels.matmul.name, "attention": eng.exec.kernels.attention.name},
         "elapsed_s": el,
         "input_tokens": n_in, "output_tokens": n_out,

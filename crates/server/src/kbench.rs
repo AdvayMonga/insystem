@@ -56,13 +56,16 @@ pub fn run(a: KbenchArgs) -> anyhow::Result<()> {
         "matmul" => {
             let kern = matmul_kernel(&a.matmul).ok_or_else(|| anyhow::anyhow!("no matmul {}", a.matmul))?;
             let w: Vec<u16> = fill(a.n * a.k, 1).iter().map(|&x| insystem_kernels::f32_to_bf16(x)).collect();
-            let pw = PackedWeight::new(kern, &w, a.n, a.k);
+            // Enough copies (~1 GiB) that the weights stream from DRAM as in the model, not from
+            // the last-level cache.
+            let copies = ((1usize << 30) / (a.n * a.k * 2)).clamp(1, 64);
+            let pws: Vec<PackedWeight> = (0..copies).map(|_| PackedWeight::new(kern, &w, a.n, a.k)).collect();
             let x = fill(a.m * a.k, 2);
             let mut y = vec![0f32; a.m * a.n];
-            (kern.run)(&x, a.m, &pw, &mut y);
+            (kern.run)(&x, a.m, &pws[0], &mut y);
             let t = Instant::now();
-            for _ in 0..a.iters {
-                (kern.run)(&x, a.m, &pw, &mut y);
+            for i in 0..a.iters {
+                (kern.run)(&x, a.m, &pws[i % copies], &mut y);
             }
             let dt = t.elapsed().as_secs_f64() / a.iters as f64;
             let flops = 2.0 * (a.m * a.n * a.k) as f64;
