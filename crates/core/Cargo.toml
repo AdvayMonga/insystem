@@ -1,0 +1,10 @@
+[package]
+name = "insystem-core"
+description = "Model-independent engine core: requests, scheduler, paged KV cache with prefix caching, batch plans."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+anyhow.workspace = true

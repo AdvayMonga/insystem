@@ -1,0 +1,9 @@
+[package]
+name = "insystem-kernels"
+description = "CPU kernels: matmul variants behind a registry, paged attention, norms, RoPE, activations."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true

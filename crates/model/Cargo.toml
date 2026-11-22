@@ -1,0 +1,12 @@
+[package]
+name = "insystem-model"
+description = "Model description (spec), Hugging Face config adapters and safetensors weight loading."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+memmap2 = "0.9"

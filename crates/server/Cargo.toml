@@ -1,0 +1,26 @@
+[package]
+name = "insystem-server"
+description = "The `insystem` binary: OpenAI-compatible HTTP server, offline benchmark, generation, equivalence check."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "insystem"
+path = "src/main.rs"
+
+[dependencies]
+insystem-core.workspace = true
+insystem-model.workspace = true
+insystem-kernels.workspace = true
+insystem-runtime.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }
+tokio-stream = "0.1"
+axum = "0.8"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+minijinja = { version = "2", features = ["loader"] }
