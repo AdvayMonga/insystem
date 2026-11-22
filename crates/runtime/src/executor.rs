@@ -338,11 +338,12 @@ impl CpuExecutor {
         let mut out = Vec::new();
         let instrs = std::mem::take(&mut self.program.instrs);
         let mut prof = self.profile.take();
+        let phase = if plan.num_prefill_tokens > 0 { "mixed" } else { "decode" };
         for ins in &instrs {
             if let Some(p) = prof.as_mut() {
                 let t0 = Instant::now();
                 self.run_instr(ins, plan, &attn_seqs, &sampled, &mut out);
-                p.add(ins.label(), t0.elapsed());
+                p.add(format!("{}.{phase}", ins.label()), t0.elapsed());
             } else {
                 self.run_instr(ins, plan, &attn_seqs, &sampled, &mut out);
             }

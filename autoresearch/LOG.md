@@ -17,3 +17,5 @@ llama.cpp (bf16 GGUF, 4 threads, flash-attn) on the same shape = 82.4 tok/s (`ll
 | 8 | prefault KV cache, best of 3 | **183.2 (+8.7% over its control), kept** |
 | 9 | reuse scratch buffers (AMX activation buffer, attention q) to cut the 6-8% sys time | 179.2, no gain, reverted |
 | 10 | flash attention: K/V rows shared across the GQA group and a 16-token query chunk, online softmax per block, q read in place | **195.5 (+6.7%), kept**; attention 2.5s → 2.1s, less than expected |
+| 11 | attention scratch sized to rows used (each task zero-filled ~160 KB) | 193.8, no gain (attention 2.1 → 1.9s); reverted. Recount: prefill attention is ~48 GFLOP of q·k dots, each a 128-wide dot with a horizontal sum, so it is compute-bound |
+| 12 | K cache transposed per block so 16 scores come from 128 vector FMAs with no horizontal sums | 192.0, no gain; attention unchanged at 2.1s, so scoring is not where its time goes. Reverted; profiler now splits labels by step type to find out |
