@@ -36,6 +36,7 @@ pub static MATMUL_KERNELS: &[MatmulKernel] = &[
 ];
 
 pub static ATTENTION_KERNELS: &[AttentionKernel] = &[
+    AttentionKernel { name: "flash", about: "per (seq, kv head, 16 query tokens): K/V rows shared across the GQA group and query chunk, online softmax per KV block", run: attention::flash },
     AttentionKernel { name: "naive", about: "per (token, head): full scores, softmax, weighted sum", run: attention::naive },
 ];
 
@@ -67,7 +68,7 @@ impl KernelSet {
 }
 
 pub const DEFAULT_MATMUL: &str = "amx";
-pub const DEFAULT_ATTENTION: &str = "naive";
+pub const DEFAULT_ATTENTION: &str = "flash";
 
 impl PackedWeight {
     pub fn new(kernel: &MatmulKernel, rowmajor: &[u16], n: usize, k: usize) -> Self {

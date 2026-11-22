@@ -222,13 +222,9 @@ impl CpuExecutor {
                 let (nh, nkv, d) = (a.n_heads, a.n_kv_heads, a.head_dim);
                 let stride = (nh + 2 * nkv) * d;
                 ensure_len(&mut self.bufs.attn, t * nh * d);
-                // Pack q contiguously as [T, nh, d] in the head of `attn`'s scratch via a copy.
-                let mut q = vec![0f32; t * nh * d];
-                for r in 0..t {
-                    q[r * nh * d..(r + 1) * nh * d].copy_from_slice(&self.bufs.qkv[r * stride..r * stride + nh * d]);
-                }
                 (self.kernels.attention.run)(&AttnArgs {
-                    q: &q,
+                    q: &self.bufs.qkv[..t * stride],
+                    q_stride: stride,
                     k_cache: &self.k_cache[layer],
                     v_cache: &self.v_cache[layer],
                     out: SendPtr(self.bufs.attn.as_mut_ptr()),

@@ -52,7 +52,7 @@ fn amx_enabled() -> bool {
     *OK.get_or_init(|| {
         // CPUID.(EAX=7, ECX=0):EDX bit 22 = AMX-BF16, bit 24 = AMX-TILE.
         // SAFETY: cpuid is always available on x86-64.
-        let edx = unsafe { std::arch::x86_64::__cpuid_count(7, 0) }.edx;
+        let edx = std::arch::x86_64::__cpuid_count(7, 0).edx;
         if edx & (1 << 22) == 0 || edx & (1 << 24) == 0 {
             return false;
         }

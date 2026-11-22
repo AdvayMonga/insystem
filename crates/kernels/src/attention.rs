@@ -15,8 +15,9 @@ pub struct AttnSeq<'a> {
 }
 
 pub struct AttnArgs<'a> {
-    /// `[T, n_heads, head_dim]`
+    /// Row `r`, head `h` is at `q[r * q_stride + h * head_dim..]`.
     pub q: &'a [f32],
+    pub q_stride: usize,
     pub k_cache: &'a [f32],
     pub v_cache: &'a [f32],
     /// `[T, n_heads, head_dim]`
@@ -50,7 +51,7 @@ pub fn naive(a: &AttnArgs) {
         let pos = s.ctx_len - s.q_len + t;
         let lo = a.window.map(|w| (pos + 1).saturating_sub(w)).unwrap_or(0);
         let row = s.q_start + t;
-        let q = &a.q[(row * h + head) * d..(row * h + head + 1) * d];
+        let q = &a.q[row * a.q_stride + head * d..row * a.q_stride + (head + 1) * d];
         let mut scores = Vec::with_capacity(pos + 1 - lo);
         let mut mx = f32::NEG_INFINITY;
         for p in lo..=pos {
@@ -78,6 +79,123 @@ pub fn naive(a: &AttnArgs) {
         // SAFETY: each (row, head) output is written by exactly one task.
         unsafe { std::ptr::copy_nonoverlapping(o.as_ptr(), a.out.add((row * h + head) * d), d) };
     });
+}
+
+/// Query tokens per task.
+const QT: usize = 16;
+const MAX_GROUP: usize = 8;
+const MAX_D: usize = 256;
+
+/// One task per (sequence, kv head, chunk of up to 16 query tokens). Each K/V row is loaded once
+/// and used by every query head of the group and every query token of the chunk; softmax is
+/// computed online one KV block at a time; no heap allocation.
+pub fn flash(a: &AttnArgs) {
+    let (h, kvh, d, bs) = (a.n_heads, a.n_kv_heads, a.head_dim, a.block_size);
+    let group = h / kvh;
+    assert!(group <= MAX_GROUP && d <= MAX_D && bs <= 64);
+    let mut tasks: Vec<(u32, u16, u32)> = Vec::new();
+    for (si, s) in a.seqs.iter().enumerate() {
+        for g in 0..kvh {
+            for t0 in (0..s.q_len).step_by(QT) {
+                tasks.push((si as u32, g as u16, t0 as u32));
+            }
+        }
+    }
+    par_for(tasks.len(), |ti| {
+        let (si, g, t0) = tasks[ti];
+        flash_task(a, &a.seqs[si as usize], g as usize, t0 as usize, group, d, bs);
+    });
+}
+
+#[inline]
+fn flash_task(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, group: usize, d: usize, bs: usize) {
+    let kvh = a.n_kv_heads;
+    let nt = (s.q_len - t0).min(QT);
+    let rows = nt * group;
+    let first_pos = s.ctx_len - s.q_len + t0;
+    let last_pos = first_pos + nt - 1;
+    let lo = a.window.map(|w| (first_pos + 1).saturating_sub(w)).unwrap_or(0);
+    let mut acc = [[0f32; MAX_D]; QT * MAX_GROUP];
+    let mut mx = [f32::NEG_INFINITY; QT * MAX_GROUP];
+    let mut sum = [0f32; QT * MAX_GROUP];
+    let mut sc = [[0f32; 64]; QT * MAX_GROUP];
+    let qrow = |t: usize, j: usize| {
+        let r = s.q_start + t0 + t;
+        let hh = g * group + j;
+        &a.q[r * a.q_stride + hh * d..r * a.q_stride + (hh + 1) * d]
+    };
+    let mut blk = lo / bs;
+    while blk * bs <= last_pos {
+        let base = s.block_table[blk] as usize * bs;
+        let p0 = blk * bs;
+        let n_keys = (last_pos + 1 - p0).min(bs);
+        // Scores for this block.
+        for t in 0..nt {
+            let pos = first_pos + t;
+            let wlo = a.window.map(|w| (pos + 1).saturating_sub(w)).unwrap_or(0);
+            for j in 0..group {
+                let q = qrow(t, j);
+                let ri = t * group + j;
+                let mut bmax = f32::NEG_INFINITY;
+                for kk in 0..n_keys {
+                    let p = p0 + kk;
+                    let v = if p > pos || p < wlo {
+                        f32::NEG_INFINITY
+                    } else {
+                        let off = ((base + kk) * kvh + g) * d;
+                        crate::matmul::dot(q, &a.k_cache[off..off + d]) * a.scale
+                    };
+                    sc[ri][kk] = v;
+                    bmax = bmax.max(v);
+                }
+                if bmax == f32::NEG_INFINITY {
+                    sc[ri][..n_keys].fill(0.0);
+                    continue;
+                }
+                let new_m = mx[ri].max(bmax);
+                let corr = (mx[ri] - new_m).exp();
+                if corr != 1.0 {
+                    for x in acc[ri][..d].iter_mut() {
+                        *x *= corr;
+                    }
+                    sum[ri] *= corr;
+                }
+                mx[ri] = new_m;
+                for kk in 0..n_keys {
+                    sc[ri][kk] = (sc[ri][kk] - new_m).exp();
+                    sum[ri] += sc[ri][kk];
+                }
+            }
+        }
+        // Weighted V, each V row loaded once for all rows.
+        for kk in 0..n_keys {
+            let off = ((base + kk) * kvh + g) * d;
+            let v = &a.v_cache[off..off + d];
+            for ri in 0..rows {
+                let w = sc[ri][kk];
+                if w == 0.0 || mx[ri] == f32::NEG_INFINITY {
+                    continue;
+                }
+                for (o, &vv) in acc[ri][..d].iter_mut().zip(v) {
+                    *o = w.mul_add(vv, *o);
+                }
+            }
+        }
+        blk += 1;
+    }
+    for t in 0..nt {
+        let r = s.q_start + t0 + t;
+        for j in 0..group {
+            let ri = t * group + j;
+            let inv = 1.0 / sum[ri];
+            let hh = g * group + j;
+            // SAFETY: each (row, head) is written by exactly one task.
+            let o = unsafe { std::slice::from_raw_parts_mut(a.out.add((r * a.n_heads + hh) * d), d) };
+            for (x, &y) in o.iter_mut().zip(&acc[ri][..d]) {
+                *x = y * inv;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +240,7 @@ mod tests {
                 let seqs = [AttnSeq { q_start: 0, q_len, ctx_len: ctx, block_table: &bt }];
                 (kern.run)(&AttnArgs {
                     q: &q,
+                    q_stride: h * d,
                     k_cache: &k,
                     v_cache: &v,
                     out: SendPtr(out.as_mut_ptr()),

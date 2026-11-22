@@ -15,3 +15,5 @@ llama.cpp (bf16 GGUF, 4 threads, flash-attn) on the same shape = 82.4 tok/s (`ll
 | 6 | control: rerun of 3 | 147.0, so single runs vary by ±15% on this shared VM. **Method change**: best of 3 runs, 3% margin. Also added `insystem peaks`: 51.7 GB/s read, 12.2 TFLOP/s AMX bf16, so the weight-bandwidth floor puts the ceiling for this benchmark near 600 tok/s |
 | 7 | control: AMX alone, best of 3 | 168.5 (168, 147, 140) |
 | 8 | prefault KV cache, best of 3 | **183.2 (+8.7% over its control), kept** |
+| 9 | reuse scratch buffers (AMX activation buffer, attention q) to cut the 6-8% sys time | 179.2, no gain, reverted |
+| 10 | flash attention: K/V rows shared across the GQA group and a 16-token query chunk, online softmax per block, q read in place | **195.5 (+6.7%), kept**; attention 2.5s → 2.1s, less than expected |
