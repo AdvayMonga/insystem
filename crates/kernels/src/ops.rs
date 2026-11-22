@@ -72,21 +72,6 @@ pub fn add_rmsnorm(resid: &mut [f32], x: &[f32], w: &[f32], eps: f32, out: &mut 
     });
 }
 
-/// In-place RMSNorm over each `head_dim` slice of rows of width `stride`, for heads
-/// `[h0, h0 + n)` of each row.
-pub fn head_rmsnorm(x: &mut [f32], stride: usize, h0: usize, n: usize, w: &[f32], eps: f32) {
-    let d = w.len();
-    let rows = x.len() / stride;
-    let mut tmp = vec![0f32; d];
-    for r in 0..rows {
-        for hh in h0..h0 + n {
-            let s = &mut x[r * stride + hh * d..r * stride + (hh + 1) * d];
-            rms_row(s, w, eps, &mut tmp);
-            s.copy_from_slice(&tmp);
-        }
-    }
-}
-
 /// Rotary embedding tables: `cos[pos * half + i]`, `sin[...]` for `half = rotary_dim / 2`.
 pub struct RopeTable {
     pub half: usize,
@@ -120,23 +105,6 @@ impl RopeTable {
             }
         }
         Self { half, cos, sin }
-    }
-}
-
-/// NeoX-style (rotate-half) RoPE, in place, on heads `[h0, h0 + n)` of rows of width `stride`.
-pub fn rope(x: &mut [f32], stride: usize, h0: usize, n: usize, d: usize, positions: &[u32], t: &RopeTable) {
-    let half = t.half;
-    for (r, &p) in positions.iter().enumerate() {
-        let c = &t.cos[p as usize * half..(p as usize + 1) * half];
-        let s = &t.sin[p as usize * half..(p as usize + 1) * half];
-        for hh in h0..h0 + n {
-            let v = &mut x[r * stride + hh * d..r * stride + hh * d + 2 * half];
-            for i in 0..half {
-                let (a, b) = (v[i], v[i + half]);
-                v[i] = a * c[i] - b * s[i];
-                v[i + half] = b * c[i] + a * s[i];
-            }
-        }
     }
 }
 

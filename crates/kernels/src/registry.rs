@@ -42,7 +42,13 @@ pub static ATTENTION_KERNELS: &[AttentionKernel] = &[
     AttentionKernel { name: "naive", about: "per (token, head): full scores, softmax, weighted sum", run: attention::naive },
 ];
 
+/// A matmul variant by name; `auto` is `amx` where the CPU has AMX and `tile_f32` elsewhere.
 pub fn matmul_kernel(name: &str) -> Option<&'static MatmulKernel> {
+    let name = match name {
+        "auto" if matmul_amx::available() => "amx",
+        "auto" => "tile_f32",
+        n => n,
+    };
     MATMUL_KERNELS.iter().find(|k| k.name == name)
 }
 
@@ -63,13 +69,9 @@ impl KernelSet {
             attention: attention_kernel(attention).ok_or_else(|| format!("no attention kernel `{attention}`"))?,
         })
     }
-
-    pub fn default_set() -> Self {
-        Self::by_names(DEFAULT_MATMUL, DEFAULT_ATTENTION).unwrap()
-    }
 }
 
-pub const DEFAULT_MATMUL: &str = "amx";
+pub const DEFAULT_MATMUL: &str = "auto";
 pub const DEFAULT_ATTENTION: &str = "flash_avx512";
 
 impl PackedWeight {

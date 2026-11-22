@@ -7,7 +7,7 @@ set -euo pipefail
 MODEL=$1 GGUF=$2 OUT=$3
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PY=${PY:-python3}
-LLAMA=${LLAMA:-$HOME/llama.cpp/build/bin/llama-server}
+LLAMA=${LLAMA:?set LLAMA to the llama-server binary}
 CONC=${CONC:-"1 4 16 32"}
 PORT=8011
 

@@ -25,7 +25,7 @@ pub fn sample(logits: &[f32], spec: &SamplerSpec) -> Sampled {
             arg = i;
         }
     }
-    let lse = mx + logits.iter().map(|&v| (v - mx).exp()).sum::<f32>().ln();
+    let lse = mx + logits.iter().map(|&v| insystem_kernels::ops::exp_fast(v - mx)).sum::<f32>().ln();
     if spec.temperature <= 0.0 {
         return Sampled { token: arg as u32, logprob: logits[arg] - lse };
     }

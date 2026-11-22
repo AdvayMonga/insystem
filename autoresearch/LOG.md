@@ -35,3 +35,25 @@ llama.cpp (bf16 GGUF, 4 threads, flash-attn) on the same shape = 82.4 tok/s (`ll
 | — | software prefetch of weight tiles 4 chunks ahead in the decode (m ≤ 16) path, with DRAM-streaming kbench | ±15%, no clear difference; reverted |
 | 21 | persistent spinning thread pool instead of rayon in the kernels: a decode step is ~360 short fork/join regions and rayon workers sleep between them (vmstat showed ~20% idle cores) | **277.9 vs champion 232.0 (+20%), kept**; all four candidate runs beat all four champion runs |
 | 22 | n-gram speculative decoding (k=2 drafts per greedy sequence; output identical to plain greedy, unit-tested) | 262.0 vs champion 277.5, no gain here: ~85% of drafts are accepted, but all 16 requests decode in lockstep, so the step count is set by the least predictable sequence (64 → 61) while every step carries more rows. Kept as an off-by-default feature for serving and agentic traffic, where finished requests are replaced |
+
+## Serving comparison (end of loop)
+
+`bench/compare.sh`: each server alone on this machine, same client (`bench/serve_bench.py`), Qwen3-1.7B bf16. llama.cpp runs `llama-server -np 32 -t 4 -b 512 -ub 512 -fa on --cache-prompt`. Chart: `serving.png`.
+
+Fixed ISL 128 / OSL 64, ratio 0.8, 4 prompts per concurrency, total tok/s (interactivity tok/s/user):
+
+| c | insystem | insystem + n-gram spec | llama.cpp |
+|---|---|---|---|
+| 1 | 33.1 (12.0) | 38.0 (13.8) | 23.3 (9.5) |
+| 4 | 108.8 (10.5) | 137.1 (13.4) | 54.2 (6.3) |
+| 16 | 258.0 (6.2) | 272.1 (6.9) | 70.0 (1.7) |
+| 32 | 312.3 (3.7) | 321.8 (3.9) | 12.5 (0.2) |
+
+Agentic (1024-token shared prefix, 4 turns of 128 new tokens, OSL 32), total tok/s / TTFT p50:
+
+| sessions | insystem | insystem + n-gram spec | llama.cpp |
+|---|---|---|---|
+| 4 | 559.6 / 0.8 s | 662.1 / 1.0 s | 15.7 / 19.4 s |
+| 8 | 669.6 / 0.8 s | 736.2 / 1.3 s | 17.6 / 34.5 s |
+
+llama.cpp completed every request without errors; its inter-token time grows to 1.4 s at c=32 and 10–18 s on the agentic load. In the agentic runs n-gram speculation adds 10–18% throughput: agent turns re-send their own context, so drafts are accepted.

@@ -205,7 +205,9 @@ async fn run(app: Shared, body: Value, prompt: Vec<u32>, is_chat: bool) -> Respo
     let codec_app = app.clone();
     tokio::spawn(async move {
         let mut det = Detok { ids: vec![], sent: 0 };
+        let mut cached = 0;
         while let Some(o) = rx.recv().await {
+            cached += o.num_cached_tokens;
             let delta = det.push(codec_app.codec.as_ref(), &o.new_tokens);
             let fin = o.finished.map(|f| f.as_str());
             let choice = if is_chat {
@@ -221,7 +223,8 @@ async fn run(app: Shared, body: Value, prompt: Vec<u32>, is_chat: bool) -> Respo
             if o.finished.is_some() {
                 if include_usage {
                     let u = json!({"id": rid, "object": chunk_obj, "model": model, "choices": [],
-                        "usage": {"prompt_tokens": n_prompt, "completion_tokens": det.ids.len(), "total_tokens": n_prompt + det.ids.len()}});
+                        "usage": {"prompt_tokens": n_prompt, "completion_tokens": det.ids.len(), "total_tokens": n_prompt + det.ids.len(),
+                                  "prompt_tokens_details": {"cached_tokens": cached}}});
                     let _ = etx.send(Event::default().data(u.to_string()));
                 }
                 let _ = etx.send(Event::default().data("[DONE]"));
