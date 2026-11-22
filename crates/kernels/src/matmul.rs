@@ -39,6 +39,25 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     s + acc.iter().sum::<f32>()
 }
 
+/// `a · b` with `b` in bf16.
+#[inline]
+pub fn dot_bf16(a: &[f32], b: &[u16]) -> f32 {
+    let mut acc = [0f32; 16];
+    let ca = a.chunks_exact(16);
+    let cb = b.chunks_exact(16);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
+        for l in 0..16 {
+            acc[l] = x[l].mul_add(bf16_to_f32(y[l]), acc[l]);
+        }
+    }
+    let mut s = 0.0;
+    for (x, &y) in ra.iter().zip(rb) {
+        s += x * bf16_to_f32(y);
+    }
+    s + acc.iter().sum::<f32>()
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;

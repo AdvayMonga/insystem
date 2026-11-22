@@ -1,11 +1,13 @@
 //! Paged causal attention over a ragged batch.
 //!
-//! K/V cache per layer: `[num_blocks, n_kv_heads, block_size, head_dim]` f32, so one kv head's
+//! K/V cache per layer: `[num_blocks, n_kv_heads, block_size, head_dim]` bf16, so one kv head's
 //! keys within a block are one contiguous `block_size * head_dim` run. Each sequence's
 //! new tokens sit at the end of its context; new token `t` of a sequence with `ctx_len` tokens
 //! and `q_len` new tokens is at position `ctx_len - q_len + t` and sees keys up to and including
 //! that position (and, with a sliding window, not before `pos - window + 1`).
 
+use crate::bf16_to_f32;
+use crate::matmul::dot_bf16;
 use crate::par::{par_for, SendPtr};
 
 /// Offset of kv head `g` of flat slot `slot` (block * block_size + offset) in a K or V cache.
@@ -25,8 +27,8 @@ pub struct AttnArgs<'a> {
     /// Row `r`, head `h` is at `q[r * q_stride + h * head_dim..]`.
     pub q: &'a [f32],
     pub q_stride: usize,
-    pub k_cache: &'a [f32],
-    pub v_cache: &'a [f32],
+    pub k_cache: &'a [u16],
+    pub v_cache: &'a [u16],
     /// `[T, n_heads, head_dim]`
     pub out: SendPtr<f32>,
     pub seqs: &'a [AttnSeq<'a>],
@@ -65,7 +67,7 @@ pub fn naive(a: &AttnArgs) {
             let slot = s.block_table[p / bs] as usize * bs + p % bs;
             let off = kv_offset(slot, kv_head, kvh, d, bs);
             let k = &a.k_cache[off..off + d];
-            let sc = crate::matmul::dot(q, k) * a.scale;
+            let sc = dot_bf16(q, k) * a.scale;
             mx = mx.max(sc);
             scores.push(sc);
         }
@@ -81,8 +83,8 @@ pub fn naive(a: &AttnArgs) {
             let off = kv_offset(slot, kv_head, kvh, d, bs);
             let v = &a.v_cache[off..off + d];
             let w = scores[i] * inv;
-            for (oo, vv) in o.iter_mut().zip(v) {
-                *oo += w * vv;
+            for (oo, &vv) in o.iter_mut().zip(v) {
+                *oo += w * bf16_to_f32(vv);
             }
         }
         // SAFETY: each (row, head) output is written by exactly one task.
@@ -152,7 +154,7 @@ fn flash_task(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, group: usize, d: u
                         f32::NEG_INFINITY
                     } else {
                         let off = kv_offset(base + kk, g, kvh, d, bs);
-                        crate::matmul::dot(q, &a.k_cache[off..off + d]) * a.scale
+                        dot_bf16(q, &a.k_cache[off..off + d]) * a.scale
                     };
                     sc[ri][kk] = v;
                     bmax = bmax.max(v);
@@ -186,7 +188,7 @@ fn flash_task(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, group: usize, d: u
                     continue;
                 }
                 for (o, &vv) in acc[ri][..d].iter_mut().zip(v) {
-                    *o = w.mul_add(vv, *o);
+                    *o = w.mul_add(bf16_to_f32(vv), *o);
                 }
             }
         }
@@ -240,16 +242,19 @@ mod tests {
         let (h, kvh, d, bs) = (4, 2, 64, 4);
         for &(q_len, ctx) in &[(1usize, 1usize), (1, 9), (5, 5), (3, 11), (16, 37)] {
             let q = rand_vec(q_len * h * d, 3);
-            let k = rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 4);
-            let v = rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 5);
+            let round = |v: Vec<f32>| -> Vec<f32> { v.into_iter().map(|x| bf16_to_f32(crate::f32_to_bf16(x))).collect() };
+            let k = round(rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 4));
+            let v = round(rand_vec(ctx.div_ceil(bs) * bs * kvh * d, 5));
             let bt: Vec<u32> = (0..ctx.div_ceil(bs) as u32).collect();
             let want = dense(&q, &k, &v, q_len, ctx, h, kvh, d, 0.17);
             let to_paged = |x: &[f32]| {
-                let mut out = vec![0f32; x.len()];
+                let mut out = vec![0u16; x.len()];
                 for slot in 0..ctx.div_ceil(bs) * bs {
                     for g in 0..kvh {
                         let o = kv_offset(slot, g, kvh, d, bs);
-                        out[o..o + d].copy_from_slice(&x[(slot * kvh + g) * d..(slot * kvh + g + 1) * d]);
+                        for (dst, &src) in out[o..o + d].iter_mut().zip(&x[(slot * kvh + g) * d..(slot * kvh + g + 1) * d]) {
+                            *dst = crate::f32_to_bf16(src);
+                        }
                     }
                 }
                 out

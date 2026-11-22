@@ -14,9 +14,9 @@ pub struct KbenchArgs {
     /// `matmul` or `attention`.
     #[arg(long)]
     pub op: String,
-    #[arg(long, default_value = "amx")]
+    #[arg(long, default_value = insystem_kernels::registry::DEFAULT_MATMUL)]
     pub matmul: String,
-    #[arg(long, default_value = "flash")]
+    #[arg(long, default_value = insystem_kernels::registry::DEFAULT_ATTENTION)]
     pub attention: String,
     #[arg(long, default_value_t = 16)]
     pub m: usize,
@@ -74,8 +74,8 @@ pub fn run(a: KbenchArgs) -> anyhow::Result<()> {
             let (h, kvh, d, bs) = (a.heads, a.kv_heads, a.head_dim, 16);
             let blocks_per = a.ctx.div_ceil(bs);
             let nblocks = a.seqs * blocks_per;
-            let k = fill(nblocks * bs * kvh * d, 3);
-            let v = fill(nblocks * bs * kvh * d, 4);
+            let k: Vec<u16> = fill(nblocks * bs * kvh * d, 3).iter().map(|&x| insystem_kernels::f32_to_bf16(x)).collect();
+            let v: Vec<u16> = fill(nblocks * bs * kvh * d, 4).iter().map(|&x| insystem_kernels::f32_to_bf16(x)).collect();
             let t_tokens = a.seqs * a.q_len;
             let q = fill(t_tokens * h * d, 5);
             let mut out = vec![0f32; t_tokens * h * d];
@@ -101,7 +101,7 @@ pub fn run(a: KbenchArgs) -> anyhow::Result<()> {
                 (kern.run)(&args);
             }
             let dt = t.elapsed().as_secs_f64() / a.iters as f64;
-            let kv_bytes = (a.seqs * a.ctx * kvh * d * 4 * 2) as f64;
+            let kv_bytes = (a.seqs * a.ctx * kvh * d * 2 * 2) as f64;
             let flops = 4.0 * (t_tokens * h * d * a.ctx) as f64;
             println!("{}", json!({"op": "attention", "kernel": kern.name, "seqs": a.seqs, "q_len": a.q_len, "ctx": a.ctx, "us": dt * 1e6,
                 "kv_gb_s": kv_bytes / dt / 1e9, "gflops": flops / dt / 1e9}));

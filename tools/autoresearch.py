@@ -45,7 +45,7 @@ def main():
     ap.add_argument("--hypothesis", required=True)
     ap.add_argument("--engine", default="", help="extra engine arguments for check and bench")
     ap.add_argument("--skip-check", action="store_true")
-    ap.add_argument("--reps", type=int, default=3, help="benchmark runs; the best is recorded")
+    ap.add_argument("--reps", type=int, default=4, help="benchmark runs; the best is recorded")
     ap.add_argument("--champion-engine", default="", help="engine arguments for the champion binary")
     a = ap.parse_args()
     extra = shlex.split(a.engine)

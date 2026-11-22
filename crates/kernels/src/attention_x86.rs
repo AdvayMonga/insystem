@@ -3,7 +3,7 @@
 //! Same tasks as [`crate::attention::flash`]: one per (sequence, kv head, up to 16 query
 //! tokens). Per KV block, each query row is held in registers while its scores against the block's
 //! keys are computed; then each row's output accumulator is held in registers while the block's
-//! values are folded in. Scratch is a per-thread buffer sized to the rows in use.
+//! values are folded in. K/V are bf16, widened to f32 as they are loaded. Scratch is a per-thread buffer sized to the rows in use.
 
 use std::arch::x86_64::*;
 use std::cell::RefCell;
@@ -11,6 +11,11 @@ use std::cell::RefCell;
 use crate::attention::{AttnArgs, AttnSeq, QT};
 use crate::ops::exp_fast;
 use crate::par::par_for;
+
+#[inline(always)]
+unsafe fn ld(p: *const u16) -> __m512 {
+    _mm512_castsi512_ps(_mm512_slli_epi32::<16>(_mm512_cvtepu16_epi32(_mm256_loadu_si256(p as *const __m256i))))
+}
 
 pub fn flash_avx512(a: &AttnArgs) {
     match a.head_dim {
@@ -93,15 +98,15 @@ unsafe fn task<const NV: usize>(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, 
             let mut bmax = f32::NEG_INFINITY;
             for kk in kstart..kend {
                 let kp = kb.add(kk * d);
-                let mut s0 = _mm512_mul_ps(q[0], _mm512_loadu_ps(kp));
-                let mut s1 = _mm512_mul_ps(q[1 % NV], _mm512_loadu_ps(kp.add(16 * (1 % NV))));
+                let mut s0 = _mm512_mul_ps(q[0], ld(kp));
+                let mut s1 = _mm512_mul_ps(q[1 % NV], ld(kp.add(16 * (1 % NV))));
                 if NV == 1 {
                     s1 = _mm512_setzero_ps();
                 }
                 let mut i = 2;
                 while i + 1 < NV {
-                    s0 = _mm512_fmadd_ps(q[i], _mm512_loadu_ps(kp.add(16 * i)), s0);
-                    s1 = _mm512_fmadd_ps(q[i + 1], _mm512_loadu_ps(kp.add(16 * (i + 1))), s1);
+                    s0 = _mm512_fmadd_ps(q[i], ld(kp.add(16 * i)), s0);
+                    s1 = _mm512_fmadd_ps(q[i + 1], ld(kp.add(16 * (i + 1))), s1);
                     i += 2;
                 }
                 let sc = _mm512_reduce_add_ps(_mm512_add_ps(s0, s1));
@@ -135,7 +140,7 @@ unsafe fn task<const NV: usize>(a: &AttnArgs, s: &AttnSeq, g: usize, t0: usize, 
                 let w = _mm512_set1_ps(pr[kk]);
                 let vp = vb.add(kk * d);
                 for i in 0..NV {
-                    o[i] = _mm512_fmadd_ps(w, _mm512_loadu_ps(vp.add(16 * i)), o[i]);
+                    o[i] = _mm512_fmadd_ps(w, ld(vp.add(16 * i)), o[i]);
                 }
             }
             for i in 0..NV {

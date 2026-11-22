@@ -77,8 +77,8 @@ pub struct CpuExecutor {
     pub kernels: KernelSet,
     store: WeightStore,
     cfg: ExecutorConfig,
-    k_cache: Vec<Vec<f32>>,
-    v_cache: Vec<Vec<f32>>,
+    k_cache: Vec<Vec<u16>>,
+    v_cache: Vec<Vec<u16>>,
     num_blocks: usize,
     probe_blocks: usize,
     rope: RopeTable,
@@ -89,12 +89,12 @@ pub struct CpuExecutor {
 const PROBE_TOKENS: usize = 48;
 
 /// A zeroed buffer whose pages are all touched now, so no step pays first-touch page faults.
-fn prefaulted(n: usize) -> Vec<f32> {
+fn prefaulted(n: usize) -> Vec<u16> {
     use rayon::prelude::*;
-    let mut v: Vec<f32> = Vec::with_capacity(n);
+    let mut v: Vec<u16> = Vec::with_capacity(n);
     // SAFETY: every element is written below before the vector is read.
     unsafe { v.set_len(n) };
-    v.par_chunks_mut(1 << 16).for_each(|c| c.fill(0.0));
+    v.par_chunks_mut(1 << 16).for_each(|c| c.fill(0));
     v
 }
 
@@ -114,7 +114,7 @@ impl CpuExecutor {
     pub fn from_parts(spec: ModelSpec, store: WeightStore, cfg: ExecutorConfig) -> anyhow::Result<Self> {
         let kernels = KernelSet::by_names(&cfg.matmul, &cfg.attention).map_err(anyhow::Error::msg)?;
         let weights = ModelWeights::load(&store, &spec, kernels.matmul).context("loading weights")?;
-        let per_token = spec.kv_bytes_per_token(4);
+        let per_token = spec.kv_bytes_per_token(2);
         let probe_blocks = PROBE_TOKENS.div_ceil(cfg.block_size);
         let total_blocks = (cfg.kv_cache_bytes / (per_token * cfg.block_size)).max(probe_blocks + 1);
         let num_blocks = total_blocks - probe_blocks;
@@ -212,8 +212,12 @@ impl CpuExecutor {
                     let slot = slot as usize;
                     for g in 0..nkv {
                         let o = insystem_kernels::attention::kv_offset(slot, g, nkv, d, self.cfg.block_size);
-                        kc[o..o + d].copy_from_slice(&row[nh * d + g * d..nh * d + (g + 1) * d]);
-                        vc[o..o + d].copy_from_slice(&row[nh * d + w + g * d..nh * d + w + (g + 1) * d]);
+                        for (dst, &x) in kc[o..o + d].iter_mut().zip(&row[nh * d + g * d..nh * d + (g + 1) * d]) {
+                            *dst = insystem_kernels::f32_to_bf16(x);
+                        }
+                        for (dst, &x) in vc[o..o + d].iter_mut().zip(&row[nh * d + w + g * d..nh * d + w + (g + 1) * d]) {
+                            *dst = insystem_kernels::f32_to_bf16(x);
+                        }
                     }
                 }
             }
