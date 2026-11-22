@@ -88,6 +88,16 @@ pub struct CpuExecutor {
 
 const PROBE_TOKENS: usize = 48;
 
+/// A zeroed buffer whose pages are all touched now, so no step pays first-touch page faults.
+fn prefaulted(n: usize) -> Vec<f32> {
+    use rayon::prelude::*;
+    let mut v: Vec<f32> = Vec::with_capacity(n);
+    // SAFETY: every element is written below before the vector is read.
+    unsafe { v.set_len(n) };
+    v.par_chunks_mut(1 << 16).for_each(|c| c.fill(0.0));
+    v
+}
+
 fn ensure_len(v: &mut Vec<f32>, n: usize) {
     if v.len() < n {
         v.resize(n, 0.0);
@@ -112,8 +122,8 @@ impl CpuExecutor {
         let mut v_cache = Vec::new();
         for l in &spec.layers {
             let n = total_blocks * cfg.block_size * l.attn.n_kv_heads * l.attn.head_dim;
-            k_cache.push(vec![0f32; n]);
-            v_cache.push(vec![0f32; n]);
+            k_cache.push(prefaulted(n));
+            v_cache.push(prefaulted(n));
         }
         let d = spec.layers[0].attn.head_dim;
         let rope = RopeTable::new(spec.rope.rotary_dim.unwrap_or(d), spec.rope.theta, cfg.max_model_len.min(spec.max_position).max(PROBE_TOKENS), spec.rope.llama3_scaling);

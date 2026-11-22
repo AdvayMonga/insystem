@@ -10,6 +10,7 @@ pub mod matmul_amx;
 pub mod matmul_x86;
 pub mod ops;
 pub mod par;
+pub mod peaks;
 pub mod registry;
 
 pub use registry::{KernelSet, MatmulKernel, PackedWeight};

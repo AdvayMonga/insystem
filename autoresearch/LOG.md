@@ -10,3 +10,8 @@ llama.cpp (bf16 GGUF, 4 threads, flash-attn) on the same shape = 82.4 tok/s (`ll
 | 1 | AVX-512 register-tiled matmul | crash: raw pointers captured by the parallel closure did not compile; fixed |
 | 2 | AVX-512 register-tiled matmul: 6×32 f32 tile, bf16 widened once per k step, should raise FLOP/s several-fold | **83.7 tok/s (4.0×), kept**; check passes; matmuls now 83%, attention 8%, kv write 4% |
 | 3 | AMX bf16 tiles: tdpbf16ps does 16× the MACs of AVX-512 FMA; bf16 activations should stay inside the check tolerance | **174.8 tok/s (2.1×), kept**; max log-prob diff 0.023 (was 0.0015). `rowdot` removed. Now: matmuls 63%, attention 16%, kv write 11% |
+| 4 | prefault the KV cache: its pages are first touched by the KV write, so each step page-faults | 177.8, within noise of 174.8; the kv-write op disappeared from the profile but matmul time rose |
+| 5 | control: rerun of 4 | 169.3 |
+| 6 | control: rerun of 3 | 147.0, so single runs vary by ±15% on this shared VM. **Method change**: best of 3 runs, 3% margin. Also added `insystem peaks`: 51.7 GB/s read, 12.2 TFLOP/s AMX bf16, so the weight-bandwidth floor puts the ceiling for this benchmark near 600 tok/s |
+| 7 | control: AMX alone, best of 3 | 168.5 (168, 147, 140) |
+| 8 | prefault KV cache, best of 3 | **183.2 (+8.7% over its control), kept** |

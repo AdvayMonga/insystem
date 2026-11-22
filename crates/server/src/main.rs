@@ -51,6 +51,8 @@ enum Cmd {
     },
     /// List kernel variants.
     Kernels,
+    /// Measure memory read bandwidth and AMX peak throughput on this machine.
+    Peaks,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -153,6 +155,12 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&spec)?);
             println!("params: {}", spec.num_params());
             print!("{}", insystem_runtime::compile(&spec));
+            Ok(())
+        }
+        Cmd::Peaks => {
+            let bw = insystem_kernels::peaks::read_bandwidth(2 << 30, 5);
+            let amx = insystem_kernels::peaks::amx_tflops(2_000_000);
+            println!("{}", serde_json::json!({"threads": rayon::current_num_threads(), "read_gb_s": bw, "amx_bf16_tflops": amx}));
             Ok(())
         }
         Cmd::Kernels => {

@@ -3,7 +3,7 @@
     python tools/autoresearch.py --label "avx512 matmul" --hypothesis "..." [--engine "--matmul x"]
 
 The benchmark is fixed for the whole loop (see DECISIONS.md D19). A run is `best` when its total
-throughput beats the best so far by more than the noise margin, `no-gain` otherwise,
+throughput (best of `--reps` runs, since this shared machine has bursts of interference) beats the best so far by more than the noise margin, `no-gain` otherwise,
 `failed-check` when `insystem check` fails, `crash` when the build or a run fails. The row is
 appended to autoresearch/results.jsonl; keeping or reverting the code is done by hand in git.
 """
@@ -22,7 +22,7 @@ REF = os.environ.get("INSYSTEM_REF", os.path.join(ROOT, "local", "ref_qwen3_1.7b
 BIN = os.path.join(ROOT, "target", "release", "insystem")
 BENCH = ["--num-prompts", "16", "--input-len", "128", "--output-len", "64", "--range-ratio", "0.8",
          "--max-num-seqs", "16", "--max-num-batched-tokens", "512", "--kv-cache-gb", "1.5", "--profile"]
-NOISE = 0.02
+NOISE = 0.03
 
 
 def rows():
@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--hypothesis", required=True)
     ap.add_argument("--engine", default="", help="extra engine arguments for check and bench")
     ap.add_argument("--skip-check", action="store_true")
+    ap.add_argument("--reps", type=int, default=3, help="benchmark runs; the best is recorded")
     a = ap.parse_args()
     extra = shlex.split(a.engine)
     prev = rows()
@@ -63,11 +64,15 @@ def main():
         if c.returncode != 0 or not row["check"].get("pass"):
             row.update(status="crash" if "pass" not in row["check"] or c.returncode not in (0, 1) else "failed-check")
             return finish(row)
-    r = subprocess.run([BIN, "bench", "--model", MODEL, *BENCH, *extra], capture_output=True, text=True)
-    if r.returncode != 0:
-        row.update(status="crash", error=r.stderr[-2000:])
-        return finish(row)
-    res = json.loads(r.stdout.strip().splitlines()[-1])
+    runs = []
+    for _ in range(a.reps):
+        r = subprocess.run([BIN, "bench", "--model", MODEL, *BENCH, *extra], capture_output=True, text=True)
+        if r.returncode != 0:
+            row.update(status="crash", error=r.stderr[-2000:])
+            return finish(row)
+        runs.append(json.loads(r.stdout.strip().splitlines()[-1]))
+    res = max(runs, key=lambda x: x["total_tok_s"])
+    row["all_total_tok_s"] = [x["total_tok_s"] for x in runs]
     row.update({k: res[k] for k in ("total_tok_s", "output_tok_s", "elapsed_s", "mean_tokens_per_step", "steps", "kernels", "profile")})
     if best is None:
         row["status"] = "baseline"

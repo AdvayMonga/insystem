@@ -81,7 +81,7 @@ thread_local! {
 #[repr(C, align(64))]
 struct TileCfg([u8; 64]);
 
-fn configure_thread() {
+pub fn configure_current_thread() {
     CONFIGURED.with(|c| {
         if c.get() {
             return;
@@ -170,7 +170,7 @@ pub fn run(x: &[f32], m: usize, w: &PackedWeight, y: &mut [f32]) {
     let bp = SendPtr(w.data.as_ptr() as *mut u16);
     let chunk = (groups / (num_threads() * 3)).max(1);
     par_ranges(groups, chunk, |g0, g1| {
-        configure_thread();
+        configure_current_thread();
         let mut c = [0f32; 1024];
         for g in g0..g1 {
             let j0 = g * GROUP * 16;
