@@ -73,7 +73,7 @@ def main():
         plt.Line2D([], [], marker="o", color="w", markerfacecolor="none", markeredgecolor=ORANGE, markeredgewidth=1.8, markersize=8, label="control / repeat"),
         plt.Line2D([], [], marker="x", color=RED, linestyle="none", markersize=8, label="crash or failed equivalence check"),
     ]
-    ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=9)
+    ax.legend(handles=handles, loc="center right", frameon=True, fontsize=9)
     fig.savefig(out, bbox_inches="tight")
     print("wrote", out)
 
