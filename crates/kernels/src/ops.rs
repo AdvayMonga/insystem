@@ -140,6 +140,41 @@ pub fn rope(x: &mut [f32], stride: usize, h0: usize, n: usize, d: usize, positio
     }
 }
 
+/// Per-head RMSNorm of q and k heads (when weights are given) followed by NeoX RoPE on q and k,
+/// in place on rows of width `stride` laid out `[q heads | k heads | v heads]`, rows in parallel.
+#[allow(clippy::too_many_arguments)]
+pub fn qk_norm_rope(x: &mut [f32], stride: usize, nh: usize, nkv: usize, d: usize, norms: Option<(&[f32], &[f32])>, eps: f32, positions: &[u32], t: &RopeTable) {
+    let rows = positions.len();
+    let xp = SendPtr(x.as_mut_ptr());
+    let half = t.half;
+    par_ranges(rows, 4, |r0, r1| {
+        for r in r0..r1 {
+            // SAFETY: each row is written by one task.
+            let row = unsafe { std::slice::from_raw_parts_mut(xp.add(r * stride), stride) };
+            let p = positions[r] as usize;
+            let c = &t.cos[p * half..(p + 1) * half];
+            let sn = &t.sin[p * half..(p + 1) * half];
+            for hh in 0..nh + nkv {
+                let v = &mut row[hh * d..(hh + 1) * d];
+                if let Some((qn, kn)) = norms {
+                    let w = if hh < nh { qn } else { kn };
+                    let ss: f32 = v.iter().map(|x| x * x).sum::<f32>() / d as f32;
+                    let inv = 1.0 / (ss + eps).sqrt();
+                    for (x, &g) in v.iter_mut().zip(w) {
+                        *x *= inv * g;
+                    }
+                }
+                let (a, b) = v[..2 * half].split_at_mut(half);
+                for i in 0..half {
+                    let (x0, x1) = (a[i], b[i]);
+                    a[i] = x0 * c[i] - x1 * sn[i];
+                    b[i] = x1 * c[i] + x0 * sn[i];
+                }
+            }
+        }
+    });
+}
+
 /// `out[t, i] = silu(gu[t, i]) * gu[t, inter + i]` for rows of `gu` of width `2 * inter`.
 pub fn silu_mul(gu: &[f32], inter: usize, out: &mut [f32]) {
     let rows = gu.len() / (2 * inter);
@@ -151,7 +186,7 @@ pub fn silu_mul(gu: &[f32], inter: usize, out: &mut [f32]) {
             // SAFETY: each row is written by one task.
             let o = unsafe { std::slice::from_raw_parts_mut(op.add(r * inter), inter) };
             for i in 0..inter {
-                o[i] = g[i] / (1.0 + (-g[i]).exp()) * u[i];
+                o[i] = g[i] / (1.0 + exp_fast(-g[i])) * u[i];
             }
         }
     });

@@ -49,3 +49,39 @@ pub fn amx_tflops(iters: usize) -> Option<f64> {
     // Each tdpbf16ps: 16 x 16 outputs x 32 products x 2 flops.
     Some((threads * iters * 4) as f64 * 16.0 * 16.0 * 32.0 * 2.0 / dt / 1e12)
 }
+
+/// TFLOP/s of the 2×2 tile loop (four 1 KiB tile loads per four `tdpbf16ps`) with every operand
+/// in one L1-resident 4 KiB buffer, all threads, or `None` without AMX.
+pub fn amx_l1_tflops(iters: usize) -> Option<f64> {
+    if !crate::matmul_amx::available() {
+        return None;
+    }
+    let threads = rayon::current_num_threads();
+    let t = Instant::now();
+    (0..threads).into_par_iter().for_each(|_| {
+        crate::matmul_amx::configure_current_thread();
+        let buf = vec![0u16; 2048];
+        let p = buf.as_ptr();
+        // SAFETY: tiles are configured; every load reads inside `buf`.
+        unsafe {
+            asm!("tilezero tmm0", "tilezero tmm1", "tilezero tmm2", "tilezero tmm3", options(nostack, nomem));
+            for _ in 0..iters {
+                asm!(
+                    "tileloadd tmm4, [{a0} + {s}*1]",
+                    "tileloadd tmm6, [{b0} + {s}*1]",
+                    "tdpbf16ps tmm0, tmm4, tmm6",
+                    "tileloadd tmm7, [{b1} + {s}*1]",
+                    "tdpbf16ps tmm1, tmm4, tmm7",
+                    "tileloadd tmm5, [{a1} + {s}*1]",
+                    "tdpbf16ps tmm2, tmm5, tmm6",
+                    "tdpbf16ps tmm3, tmm5, tmm7",
+                    a0 = in(reg) p, a1 = in(reg) p.add(512), b0 = in(reg) p.add(1024), b1 = in(reg) p.add(1536),
+                    s = in(reg) 64usize,
+                    options(nostack, readonly)
+                );
+            }
+        }
+    });
+    let dt = t.elapsed().as_secs_f64();
+    Some((threads * iters * 4) as f64 * 16.0 * 16.0 * 32.0 * 2.0 / dt / 1e12)
+}

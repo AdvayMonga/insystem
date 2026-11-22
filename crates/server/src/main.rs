@@ -164,7 +164,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Peaks => {
             let bw = insystem_kernels::peaks::read_bandwidth(2 << 30, 5);
             let amx = insystem_kernels::peaks::amx_tflops(2_000_000);
-            println!("{}", serde_json::json!({"threads": rayon::current_num_threads(), "read_gb_s": bw, "amx_bf16_tflops": amx}));
+            let amx_l1 = insystem_kernels::peaks::amx_l1_tflops(1_000_000);
+            println!("{}", serde_json::json!({"threads": rayon::current_num_threads(), "read_gb_s": bw, "amx_bf16_tflops": amx, "amx_bf16_l1_loads_tflops": amx_l1}));
             Ok(())
         }
         Cmd::Kernels => {

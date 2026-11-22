@@ -25,3 +25,7 @@ llama.cpp (bf16 GGUF, 4 threads, flash-attn) on the same shape = 82.4 tok/s (`ll
 | 15 | AVX-512 attention: q and output rows in registers per KV block, scratch sized to rows, KV blocks laid out [block][kv head][slot][d] | kbench 714 → 440 µs (now at ~48 GB/s, the bandwidth limit); full run 213.8 vs best 209.0, inside the noise margin; the profile shows attention 2.0 → 1.3s |
 | — | **Method change**: interleaved A/B. The candidate and a saved champion binary run alternately 3× each in the same session; win = best candidate > best champion by 2% | — |
 | 16 | 15 again, by A/B | **candidate 208.4 vs champion 196.8 (+5.9%), kept** |
+| — | prefill AMX matmul: tasks over (row block that fits L2 × panel range) so activations are not re-streamed from L3 per panel | kbench 23.8 → 18.9 ms then 17.8 / 15.5 on reruns: within kbench noise; not taken further |
+| — | k-blocking with C tiles reloaded per 16-chunk block (weights kept in L1) | kbench single-thread 15.5 → 31.8 ms, worse; dropped |
+| — | **New peak measured** (`insystem peaks`): the 2×2 tile loop with all four tile loads from L1 reaches only 3.5 TFLOP/s on 4 threads (vs 12.2 register-only), so prefill matmuls at 1.2-1.6 TFLOP/s are at 35-45% of the achievable ceiling. Re-ranked: decode matmuls 6.0s (floor 4.25s), prefill 3.7s, misc ops 1.5s (serial or scalar), attention 1.3s | — |
+| 17 | parallel qk-norm+RoPE per token (was single-threaded) and a vectorizable polynomial exp in SiLU (was scalar libm) | **213.3 vs champion 186.4 (+14%), kept** |

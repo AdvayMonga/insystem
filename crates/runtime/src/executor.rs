@@ -198,11 +198,8 @@ impl CpuExecutor {
                 let stride = (nh + 2 * nkv) * d;
                 let lw = &self.weights.layers[layer];
                 let qkv = &mut self.bufs.qkv[..t * stride];
-                if let (Some(qn), Some(kn)) = (&lw.q_norm, &lw.k_norm) {
-                    ops::head_rmsnorm(qkv, stride, 0, nh, qn, eps);
-                    ops::head_rmsnorm(qkv, stride, nh, nkv, kn, eps);
-                }
-                ops::rope(qkv, stride, 0, nh + nkv, d, &plan.positions, &self.rope);
+                let norms = lw.q_norm.as_deref().zip(lw.k_norm.as_deref());
+                ops::qk_norm_rope(qkv, stride, nh, nkv, d, norms, eps, &plan.positions, &self.rope);
             }
             Instr::KvWrite { layer } => {
                 let a = &self.spec.layers[layer].attn;
